@@ -7,6 +7,146 @@
 #include <chrono>
 #include <algorithm>
 
+sf::Uint32 Rgb2Lab(sf::Uint32 i_rgba)
+{
+	const auto* p_rgba = reinterpret_cast<const sf::Uint8*>(&i_rgba);
+
+	double rgb[3], xyz[3], lab[3];
+	// rgb to xyz
+	for (size_t i = 0; i < 3; i++)
+	{
+		rgb[i] = p_rgba[i] / 255.0;
+		if (rgb[i] > .04045)
+			rgb[i] = std::pow((rgb[i] + 0.055) / 1.055, 2.4);
+		else
+			rgb[i] /= 12.92;
+		rgb[i] *= 100.;
+	}
+
+	xyz[0] = rgb[0] * .412453 + rgb[1] * .357580 + rgb[2] * .180423;
+	xyz[1] = rgb[0] * .212671 + rgb[1] * .715160 + rgb[2] * .072169;
+	xyz[2] = rgb[0] * .019334 + rgb[1] * .119193 + rgb[2] * .950527;
+
+	// xyz to lab
+	xyz[0] = xyz[0] / 95.0489;
+	xyz[1] = xyz[1] / 100.0;
+	xyz[2] = xyz[2] / 108.8840;
+	// f(t)
+	constexpr double d = 6. / 29.;
+	constexpr double dp2 = d * d;
+	constexpr double dp3 = d * d * d;
+
+	for (size_t i = 0; i < 3; i++)
+	{
+		if (xyz[i] > dp3)
+			xyz[i] = std::pow(xyz[i], 1. / 3.);
+		else
+			xyz[i] = xyz[i] / (3 * dp2) + 4. / 29.;
+	}
+
+	lab[0] = 116. * xyz[1] - 16.;
+	lab[1] = 500. * (xyz[0] - xyz[1]);
+	lab[2] = 200. * (xyz[1] - xyz[2]);
+	if (lab[0] < 0 || lab[0] > 100 ||
+		lab[1] < -128 || lab[0] > 127 ||
+		lab[2] < -128 || lab[2] > 127)
+		std::cout << "overflow lab\n";
+
+	sf::Uint32 LAB = 0;
+	auto* p_lab = reinterpret_cast<char*>(&LAB);
+	p_lab[0] = lab[0];
+	p_lab[1] = lab[1];
+	p_lab[2] = lab[2];
+	return LAB;
+}
+
+sf::Uint32 Lab2Rgb(sf::Uint32 i_lab)
+{
+	const auto* p_lab = reinterpret_cast<const char*>(&i_lab);
+	//std::cout << int(p_lab[0]) << ' ' << int(p_lab[1]) << ' ' << int(p_lab[2]) << " => ";
+	double xyz[3], rgb[3];
+	// lab to xyz
+	xyz[1] = (p_lab[0] + 16.) / 116.;
+	xyz[0] = xyz[1] + p_lab[1] / 500.;
+	xyz[2] = xyz[1] - p_lab[2] / 200.;
+
+	constexpr double d = 6. / 29.;
+	constexpr double dp2 = d * d;
+	for (size_t i = 0; i < 3; i++)
+	{
+		if (xyz[i] > d)
+			xyz[i] = std::pow(xyz[i], 3.);
+		else
+			xyz[i] = 3 * dp2 * (xyz[i] - 4. / 29.);
+	}
+
+	xyz[0] *= 95.0489;
+	xyz[1] *= 100.0;
+	xyz[2] *= 108.8840;
+	// xyz[0] /= 100.;
+	// xyz[1] /= 100.;
+	// xyz[2] /= 100.;
+
+	// xyz to rgb
+	rgb[0] = xyz[0] * 3.2406 + xyz[1] * (-1.5372) + xyz[2] * (-0.4986);
+	rgb[1] = xyz[0] * (-0.9689) + xyz[1] * 1.8758 + xyz[2] * 0.0415;
+	rgb[2] = xyz[0] * 0.0557 + xyz[1] * (-0.2040) + xyz[2] * 1.0570;
+
+	for (size_t i = 0; i < 3; i++)
+	{
+		rgb[i] /= 100.;
+		if (rgb[i] > 0.0031308)
+			rgb[i] = 1.055 * std::pow(rgb[i], 1. / 2.4) - 0.055;
+		else
+			rgb[i] = 12.92 * rgb[i];
+		rgb[i] *= 255.;
+	}
+	for (size_t i = 0; i < 3; i++)
+		if (rgb[i] >= 256.)
+			std::cout << "overflow rgb\n";
+
+
+	sf::Uint32 RGB = 0;
+	auto* p_rgb = reinterpret_cast<sf::Uint8*>(&RGB);
+	p_rgb[0] = rgb[0];
+	p_rgb[1] = rgb[1];
+	p_rgb[2] = rgb[2];
+	p_rgb[3] = 255;
+	return RGB;
+}
+
+
+sf::Image FlipFlopConvert(const sf::Image& i_image)
+{
+	const auto image_size = i_image.getSize();
+	std::vector<sf::Uint32> raw_pixel_data(image_size.x * image_size.y);
+	auto* p_pixel_data = raw_pixel_data.data();
+	std::memcpy(p_pixel_data, i_image.getPixelsPtr(), raw_pixel_data.size() * 4);
+	 for (auto& pixel : raw_pixel_data)
+	 {
+	 	auto* p_rgba = reinterpret_cast<char*>(&pixel);
+		std::cout << int(p_rgba[3]) << "\n";
+	 }
+
+
+	for (auto& pixel : raw_pixel_data)
+		pixel = Rgb2Lab(pixel);
+
+	 for (auto& pixel : raw_pixel_data)
+	 {
+	 	auto* p_lab = reinterpret_cast<char*>(&pixel);
+	 	p_lab[1] = 0;
+	 	p_lab[2] = 0;
+	 }
+
+	for (auto& pixel : raw_pixel_data)
+		pixel = Lab2Rgb(pixel);
+
+	sf::Image res;
+	res.create(image_size.x, image_size.y, reinterpret_cast<sf::Uint8*>(raw_pixel_data.data()));
+	return res;
+}
+
 size_t Distance(const sf::Uint32* i_color_1, const sf::Uint32* i_color_2)
 {
 	const auto* c1 = reinterpret_cast<const sf::Uint8*>(i_color_1);
@@ -81,7 +221,7 @@ std::vector<sf::Uint32> CreateColorPallet(sf::Uint32* ip_pixels, size_t i_number
 		const auto average = Average(ip_pixels, i_number_of_pixels);
 		for (size_t i = 0; i < i_number_of_pixels; i++)
 			ip_pixels[i] = average;
-		
+
 		return { average };
 	}
 
@@ -154,7 +294,7 @@ sf::Image CreateSortedImage(const sf::Image& i_image)
 	auto* p_pixel_data = raw_pixel_data.data();
 	std::memcpy(p_pixel_data, i_image.getPixelsPtr(), raw_data_size);
 
-	CreateColorPallet(p_pixel_data, number_of_pixels,3);
+	CreateColorPallet(p_pixel_data, number_of_pixels);
 
 	sf::Image res;
 	res.create(image_size.x, image_size.y, reinterpret_cast<sf::Uint8*>(raw_pixel_data.data()));
@@ -179,9 +319,10 @@ int main(int argc, char** argv)
 	std::vector<std::chrono::time_point<std::chrono::system_clock>> timestamps;
 	timestamps.emplace_back(std::chrono::system_clock::now());
 
-	const auto pallet = CreateColorPallet(image);
-	timestamps.emplace_back(std::chrono::system_clock::now());
-
+	const auto reduced_image = FlipFlopConvert(image);
+	const auto sorted_image = image;
+	const auto reduced_sorted_image = image;
+	/*
 	const auto reduced_image = ApplyColorPallet(image, pallet);
 	timestamps.emplace_back(std::chrono::system_clock::now());
 
@@ -190,6 +331,8 @@ int main(int argc, char** argv)
 
 	const auto reduced_sorted_image = ApplyColorPallet(sorted_image, pallet);
 	timestamps.emplace_back(std::chrono::system_clock::now());
+	*/
+
 
 	for (size_t i = 1; i < timestamps.size(); ++i)
 	{
