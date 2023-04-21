@@ -6,6 +6,9 @@
 #include <cstring>
 #include <chrono>
 #include <algorithm>
+#include <map>
+
+#include <oneapi/tbb/parallel_for.h>
 
 sf::Uint32 Rgb2Lab(sf::Uint32 i_rgba)
 {
@@ -119,31 +122,43 @@ sf::Uint32 Lab2Rgb(sf::Uint32 i_lab)
 sf::Image FlipFlopConvert(const sf::Image& i_image)
 {
 	const auto image_size = i_image.getSize();
-	std::vector<sf::Uint32> raw_pixel_data(image_size.x * image_size.y);
-	auto* p_pixel_data = raw_pixel_data.data();
-	std::memcpy(p_pixel_data, i_image.getPixelsPtr(), raw_pixel_data.size() * 4);
-	 for (auto& pixel : raw_pixel_data)
-	 {
-	 	auto* p_rgba = reinterpret_cast<char*>(&pixel);
-		std::cout << int(p_rgba[3]) << "\n";
-	 }
+	std::vector<sf::Uint32> pixel_data(image_size.x * image_size.y);
+	auto* p_pixel_data = pixel_data.data();
+	std::memcpy(p_pixel_data, i_image.getPixelsPtr(), pixel_data.size() * 4);
+	//for (auto& pixel : raw_pixel_data)
+	//{
+	//	auto* p_rgba = reinterpret_cast<char*>(&pixel);
+	//	std::cout << int(p_rgba[3]) << "\n";
+	//}
 
 
-	for (auto& pixel : raw_pixel_data)
-		pixel = Rgb2Lab(pixel);
+	tbb::parallel_for(tbb::blocked_range<size_t>(0, pixel_data.size()),
+		[&pixel_data](const tbb::blocked_range<size_t>& i_r) {
+			for (size_t i = i_r.begin(); i < i_r.end(); ++i)
+				pixel_data[i] = Rgb2Lab(pixel_data[i]);
 
-	 for (auto& pixel : raw_pixel_data)
-	 {
-	 	auto* p_lab = reinterpret_cast<char*>(&pixel);
-	 	p_lab[1] = 0;
-	 	p_lab[2] = 0;
-	 }
 
-	for (auto& pixel : raw_pixel_data)
-		pixel = Lab2Rgb(pixel);
+		});
+
+
+	tbb::parallel_for(tbb::blocked_range<size_t>(0, pixel_data.size()),
+		[&pixel_data](const tbb::blocked_range<size_t>& i_r) {
+			for (size_t i = i_r.begin(); i < i_r.end(); ++i)
+			{
+				auto* p_lab = reinterpret_cast<char*>(&pixel_data[i]);
+				p_lab[1] = 0;
+				p_lab[2] = 0;
+			}
+		});
+
+	tbb::parallel_for(tbb::blocked_range<size_t>(0, pixel_data.size()),
+		[&pixel_data](const tbb::blocked_range<size_t>& i_r) {
+			for (size_t i = i_r.begin(); i < i_r.end(); ++i)
+				pixel_data[i] = Lab2Rgb(pixel_data[i]);
+		});
 
 	sf::Image res;
-	res.create(image_size.x, image_size.y, reinterpret_cast<sf::Uint8*>(raw_pixel_data.data()));
+	res.create(image_size.x, image_size.y, reinterpret_cast<sf::Uint8*>(pixel_data.data()));
 	return res;
 }
 
@@ -179,6 +194,7 @@ sf::Uint32 Average(const sf::Uint32* ip_pixels, size_t i_number_of_pixels)
 
 void Sort(sf::Uint32* iop_pixels, size_t i_number_of_pixels, size_t i_chanel)
 {
+
 	for (size_t i = 0; i < i_number_of_pixels - 1; i++)
 		for (size_t j = 0; j < i_number_of_pixels - i - 1; j++)
 		{
@@ -214,6 +230,31 @@ size_t WidestChannel(const sf::Uint32* ip_pixels, size_t i_number_of_pixels)
 	return 2;
 }
 
+
+void CreateHistogram(sf::Uint32* ip_pixels, size_t i_number_of_pixels, size_t i_devisions = 4)
+{
+	std::map<sf::Uint8, size_t> hist;
+	size_t chanel = WidestChannel(ip_pixels, i_number_of_pixels);
+	for (size_t i = 0; i < i_number_of_pixels; i++)
+	{
+		const auto* p = reinterpret_cast<const sf::Uint8*>(ip_pixels + i);
+		auto& colummn = hist[p[chanel]];
+		++colummn;
+	}
+	for (auto const& [chanel_value, count] : hist)
+		std::cout << int(chanel_value) << '\t' << count << '\n';
+
+}
+
+void CreateHistogram(const sf::Image& i_image, size_t i_devisions = 4)
+{
+	const auto image_size = i_image.getSize();
+	std::vector<sf::Uint32> raw_pixel_data(image_size.x * image_size.y);
+	auto* p_pixel_data = raw_pixel_data.data();
+	std::memcpy(p_pixel_data, i_image.getPixelsPtr(), raw_pixel_data.size() * 4);
+	CreateHistogram(p_pixel_data, raw_pixel_data.size());
+}
+
 std::vector<sf::Uint32> CreateColorPallet(sf::Uint32* ip_pixels, size_t i_number_of_pixels, size_t i_devisions = 4)
 {
 	if (i_devisions == 0) //calculate averege
@@ -243,6 +284,7 @@ std::vector<sf::Uint32> CreateColorPallet(const sf::Image& i_image)
 	std::vector<sf::Uint32> raw_pixel_data(image_size.x * image_size.y);
 	auto* p_pixel_data = raw_pixel_data.data();
 	std::memcpy(p_pixel_data, i_image.getPixelsPtr(), raw_pixel_data.size() * 4);
+
 
 	return CreateColorPallet(p_pixel_data, raw_pixel_data.size());
 }
@@ -299,6 +341,29 @@ sf::Image CreateSortedImage(const sf::Image& i_image)
 	sf::Image res;
 	res.create(image_size.x, image_size.y, reinterpret_cast<sf::Uint8*>(raw_pixel_data.data()));
 	return res;
+
+}
+
+sf::Image UniformQuantizedImage(const sf::Image& i_image, size_t i_n = 3)
+{
+	const auto image_size = i_image.getSize();
+	std::vector<sf::Uint32> pixel_data(image_size.x * image_size.y);
+	auto* p_pixel_data = pixel_data.data();
+	std::memcpy(p_pixel_data, i_image.getPixelsPtr(), pixel_data.size() * 4);
+
+	tbb::parallel_for(tbb::blocked_range<size_t>(0, pixel_data.size()),
+		[p_pixel_data, i_n](const tbb::blocked_range<size_t>& i_r) {
+			for (size_t i = i_r.begin(); i < i_r.end(); ++i)
+			{
+				auto* p_raw_pixel_data = reinterpret_cast<sf::Uint8*>(p_pixel_data + i);
+				for (size_t j = 0; j < 4; j++)
+					p_raw_pixel_data[j] = std::round(p_raw_pixel_data[j] * (i_n / 255.)) * 255. / i_n;
+			}
+		});
+
+	sf::Image res;
+	res.create(image_size.x, image_size.y, reinterpret_cast<sf::Uint8*>(pixel_data.data()));
+	return res;
 }
 
 int main(int argc, char** argv)
@@ -315,14 +380,22 @@ int main(int argc, char** argv)
 	if (image.loadFromFile(image_path))
 		std::cout << "Background image was loaded" << std::endl;
 	const auto image_size = image.getSize();
-
 	std::vector<std::chrono::time_point<std::chrono::system_clock>> timestamps;
 	timestamps.emplace_back(std::chrono::system_clock::now());
 
+	CreateHistogram(image);
 	const auto reduced_image = FlipFlopConvert(image);
-	const auto sorted_image = image;
+	timestamps.emplace_back(std::chrono::system_clock::now());
+	const auto sorted_image = UniformQuantizedImage(image,6);
+	timestamps.emplace_back(std::chrono::system_clock::now());
 	const auto reduced_sorted_image = image;
+	timestamps.emplace_back(std::chrono::system_clock::now());
+
 	/*
+	const auto pallet = CreateColorPallet(image);
+	timestamps.emplace_back(std::chrono::system_clock::now());
+	//return 3;
+
 	const auto reduced_image = ApplyColorPallet(image, pallet);
 	timestamps.emplace_back(std::chrono::system_clock::now());
 
@@ -331,6 +404,7 @@ int main(int argc, char** argv)
 
 	const auto reduced_sorted_image = ApplyColorPallet(sorted_image, pallet);
 	timestamps.emplace_back(std::chrono::system_clock::now());
+
 	*/
 
 
@@ -339,6 +413,7 @@ int main(int argc, char** argv)
 		std::chrono::duration<int64_t, std::nano> time = timestamps[i] - timestamps[i - 1];
 		std::cout << "Period " << i << ": " << time.count() / 1000000.0 << std::endl;
 	}
+
 
 	sf::Texture background_texture;
 	background_texture.loadFromImage(image);
