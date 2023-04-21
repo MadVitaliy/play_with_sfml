@@ -11,6 +11,7 @@
 
 #include <oneapi/tbb/parallel_for.h>
 #include <oneapi/tbb/parallel_reduce.h>
+#include <oneapi/tbb/combinable.h>
 
 sf::Uint32 Rgb2Lab(sf::Uint32 i_rgba)
 {
@@ -144,7 +145,7 @@ sf::Image FlipFlopConvert(const sf::Image& i_image)
 
 
 	tbb::parallel_for(tbb::blocked_range<sf::Uint32*>(p_pixel_data, p_pixel_data + pixel_data.size()),
-		[&pixel_data](const tbb::blocked_range<sf::Uint32*>& i_r) {
+		[](const tbb::blocked_range<sf::Uint32*>& i_r) {
 			for (sf::Uint32* p_pixel = i_r.begin(); p_pixel != i_r.end(); ++p_pixel)
 			{
 				auto* p_lab = reinterpret_cast<char*>(p_pixel);
@@ -194,17 +195,29 @@ sf::Uint32 Average(const sf::Uint32* ip_pixels, size_t i_number_of_pixels)
 	return average;
 }
 
-sf::Uint32 PAverage(const sf::Uint32* ip_pixels, size_t i_number_of_pixels)
+sf::Uint32 PAverage(sf::Uint32* ip_pixels, size_t i_number_of_pixels)
 {
-	std::array<size_t, 4> accum = { 0,0,0,0 };
-	for (size_t i = 0; i < i_number_of_pixels; i++)
-	{
-		const auto* p = reinterpret_cast<const sf::Uint8*>(ip_pixels + i);
-		accum[0] += p[0];
-		accum[1] += p[1];
-		accum[2] += p[2];
-		accum[3] += p[3];
-	}
+	tbb::combinable<std::array<size_t, 4>> sum(std::array<size_t, 4>{ 0, 0, 0, 0 });
+	tbb::parallel_for(tbb::blocked_range<sf::Uint32*>(ip_pixels, ip_pixels + i_number_of_pixels),
+		[&sum](const tbb::blocked_range<sf::Uint32*>& i_r) {
+			for (sf::Uint32* p_pixel = i_r.begin(); p_pixel != i_r.end(); ++p_pixel)
+			{
+				auto& partial_sum = sum.local();
+				auto* p = reinterpret_cast<char*>(p_pixel);
+				partial_sum[0] += p[0];
+				partial_sum[1] += p[1];
+				partial_sum[2] += p[2];
+				partial_sum[3] += p[3];
+			}
+		});
+
+	std::array<size_t, 4> accum = sum.combine([](const std::array<size_t, 4>& f, const std::array<size_t, 4>& s) {
+		auto partial_sum = f;
+		for (size_t i = 0; i < partial_sum.size(); i++)
+			partial_sum[i] += s[i];
+		return partial_sum;
+		});
+
 	sf::Uint32 average = 0;
 	sf::Uint8* p = reinterpret_cast<sf::Uint8*>(&average);
 	p[0] = accum[0] / i_number_of_pixels;
@@ -233,17 +246,74 @@ void Sort(sf::Uint32* iop_pixels, size_t i_number_of_pixels, size_t i_chanel)
 size_t WidestChannel(const sf::Uint32* ip_pixels, size_t i_number_of_pixels)
 {
 	sf::Uint8 min_r = 0, min_g = 0, min_b = 0, max_r = 0, max_g = 0, max_b = 0;
+	const auto* p = reinterpret_cast<const sf::Uint8*>(ip_pixels);
 	for (size_t i = 0; i < i_number_of_pixels; i++)
 	{
-		const auto* p = reinterpret_cast<const sf::Uint8*>(ip_pixels + i);
 		min_r = std::min(min_r, p[0]);
 		min_g = std::min(min_g, p[1]);
 		min_b = std::min(min_b, p[2]);
 		max_r = std::max(max_r, p[0]);
 		max_g = std::max(max_g, p[1]);
 		max_b = std::max(max_b, p[2]);
+		p += 4;
 	}
 	sf::Uint8 d_r = max_r - min_r, d_g = max_g - min_g, d_b = max_b - min_b;
+	std::cout << "Ranges: " << int(d_r) << " " << int(d_g) << " " << int(d_b) << " " << std::endl;
+	if (d_r >= d_b && d_r >= d_g)
+		return 0;
+	if (d_g >= d_r && d_g >= d_b)
+		return 1;
+	return 2;
+}
+
+
+size_t DWidestChannel(const sf::Uint32* ip_pixels, size_t i_number_of_pixels)
+{
+	class MinMax {
+		const sf::Uint32* m_pixels;
+	public:
+		sf::Uint8 m_min_r = 0, m_min_g = 0, m_min_b = 0, m_max_r = 0, m_max_g = 0, m_max_b = 0;
+
+		void operator()(const tbb::blocked_range<size_t>& r) {
+			sf::Uint8 min_r = m_min_r, min_g = m_min_g, min_b = m_min_b, max_r = m_max_r, max_g = m_max_g, max_b = m_max_b;
+			size_t end = r.end();
+			for (size_t i = r.begin(); i != end; ++i)
+			{
+				const auto* p = reinterpret_cast<const sf::Uint8*>(m_pixels + i);
+				min_r = std::min(min_r, p[0]);
+				min_g = std::min(min_g, p[1]);
+				min_b = std::min(min_b, p[2]);
+				max_r = std::max(max_r, p[0]);
+				max_g = std::max(max_g, p[1]);
+				max_b = std::max(max_b, p[2]);
+			}
+			// mutex of the instance is needed here
+			m_min_r = min_r;
+			m_min_g = min_g;
+			m_min_b = min_b;
+			m_max_r = max_r;
+			m_max_g = max_g;
+			m_max_b = max_b;
+		}
+
+		MinMax(MinMax& x, tbb::split) : m_pixels(x.m_pixels) {}
+
+		void join(const MinMax& y) {
+			m_min_r = std::min(m_min_r, y.m_min_r);
+			m_min_g = std::min(m_min_g, y.m_min_g);
+			m_min_b = std::min(m_min_b, y.m_min_b);
+			m_max_r = std::max(m_max_r, y.m_max_r);
+			m_max_g = std::max(m_max_g, y.m_max_g);
+			m_max_b = std::max(m_max_b, y.m_max_b);
+		}
+
+		MinMax(const sf::Uint32* i_pixels) : m_pixels(i_pixels)
+		{}
+	};
+	MinMax min_max(ip_pixels);
+	tbb::parallel_reduce(tbb::blocked_range<size_t>(0, i_number_of_pixels), min_max);
+
+	sf::Uint8 d_r = min_max.m_max_r - min_max.m_min_r, d_g = min_max.m_max_g - min_max.m_min_g, d_b = min_max.m_max_b - min_max.m_min_b;
 	std::cout << "Ranges: " << int(d_r) << " " << int(d_g) << " " << int(d_b) << " " << std::endl;
 	if (d_r >= d_b && d_r >= d_g)
 		return 0;
@@ -264,7 +334,7 @@ void CreateHistogram(sf::Uint32* ip_pixels, size_t i_number_of_pixels, size_t i_
 		++colummn;
 	}
 	for (auto const& [chanel_value, count] : hist)
-		std::cout << int(chanel_value) << '\t' << count << '\n';
+		std::cout << int(chanel_value) << ' ' << count << '\n';
 
 }
 
@@ -388,6 +458,30 @@ sf::Image UniformQuantizedImage(const sf::Image& i_image, size_t i_n = 3)
 	return res;
 }
 
+void Comp(const sf::Image& i_image)
+{
+	const auto image_size = i_image.getSize();
+	std::vector<sf::Uint32> pixel_data(image_size.x * image_size.y);
+	auto* p_pixel_data = pixel_data.data();
+	std::memcpy(p_pixel_data, i_image.getPixelsPtr(), pixel_data.size() * 4);
+
+	std::vector<std::chrono::time_point<std::chrono::system_clock>> timestamps;
+	timestamps.emplace_back(std::chrono::system_clock::now());
+	const auto f_a = WidestChannel(p_pixel_data, pixel_data.size());
+	timestamps.emplace_back(std::chrono::system_clock::now());
+	const auto s_a = DWidestChannel(p_pixel_data, pixel_data.size());
+	timestamps.emplace_back(std::chrono::system_clock::now());
+
+	std::cout << f_a << " " << s_a << std::endl;
+
+	for (size_t i = 1; i < timestamps.size(); ++i)
+	{
+		std::chrono::duration<int64_t, std::nano> time = timestamps[i] - timestamps[i - 1];
+		std::cout << "per" << i << ": " << time.count() / 1000000.0 << std::endl;
+	}
+}
+
+
 int main(int argc, char** argv)
 {
 	if (argc < 2)
@@ -401,6 +495,9 @@ int main(int argc, char** argv)
 	sf::Image image;
 	if (image.loadFromFile(image_path))
 		std::cout << "Background image was loaded" << std::endl;
+
+	Comp(image);
+
 	const auto image_size = image.getSize();
 	std::vector<std::chrono::time_point<std::chrono::system_clock>> timestamps;
 	timestamps.emplace_back(std::chrono::system_clock::now());
