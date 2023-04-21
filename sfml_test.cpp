@@ -7,8 +7,10 @@
 #include <chrono>
 #include <algorithm>
 #include <map>
+#include <array>
 
 #include <oneapi/tbb/parallel_for.h>
+#include <oneapi/tbb/parallel_reduce.h>
 
 sf::Uint32 Rgb2Lab(sf::Uint32 i_rgba)
 {
@@ -141,11 +143,11 @@ sf::Image FlipFlopConvert(const sf::Image& i_image)
 		});
 
 
-	tbb::parallel_for(tbb::blocked_range<size_t>(0, pixel_data.size()),
-		[&pixel_data](const tbb::blocked_range<size_t>& i_r) {
-			for (size_t i = i_r.begin(); i < i_r.end(); ++i)
+	tbb::parallel_for(tbb::blocked_range<sf::Uint32*>(p_pixel_data, p_pixel_data + pixel_data.size()),
+		[&pixel_data](const tbb::blocked_range<sf::Uint32*>& i_r) {
+			for (sf::Uint32* p_pixel = i_r.begin(); p_pixel != i_r.end(); ++p_pixel)
 			{
-				auto* p_lab = reinterpret_cast<char*>(&pixel_data[i]);
+				auto* p_lab = reinterpret_cast<char*>(p_pixel);
 				p_lab[1] = 0;
 				p_lab[2] = 0;
 			}
@@ -174,7 +176,27 @@ size_t Distance(const sf::Uint32* i_color_1, const sf::Uint32* i_color_2)
 
 sf::Uint32 Average(const sf::Uint32* ip_pixels, size_t i_number_of_pixels)
 {
-	size_t accum[4] = { 0,0,0,0 };
+	std::array<size_t, 4> accum = { 0,0,0,0 };
+	for (size_t i = 0; i < i_number_of_pixels; i++)
+	{
+		const auto* p = reinterpret_cast<const sf::Uint8*>(ip_pixels + i);
+		accum[0] += p[0];
+		accum[1] += p[1];
+		accum[2] += p[2];
+		accum[3] += p[3];
+	}
+	sf::Uint32 average = 0;
+	sf::Uint8* p = reinterpret_cast<sf::Uint8*>(&average);
+	p[0] = accum[0] / i_number_of_pixels;
+	p[1] = accum[1] / i_number_of_pixels;
+	p[2] = accum[2] / i_number_of_pixels;
+	p[3] = accum[3] / i_number_of_pixels;
+	return average;
+}
+
+sf::Uint32 PAverage(const sf::Uint32* ip_pixels, size_t i_number_of_pixels)
+{
+	std::array<size_t, 4> accum = { 0,0,0,0 };
 	for (size_t i = 0; i < i_number_of_pixels; i++)
 	{
 		const auto* p = reinterpret_cast<const sf::Uint8*>(ip_pixels + i);
@@ -386,7 +408,7 @@ int main(int argc, char** argv)
 	CreateHistogram(image);
 	const auto reduced_image = FlipFlopConvert(image);
 	timestamps.emplace_back(std::chrono::system_clock::now());
-	const auto sorted_image = UniformQuantizedImage(image,6);
+	const auto sorted_image = UniformQuantizedImage(image, 6);
 	timestamps.emplace_back(std::chrono::system_clock::now());
 	const auto reduced_sorted_image = image;
 	timestamps.emplace_back(std::chrono::system_clock::now());
