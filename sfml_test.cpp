@@ -8,10 +8,13 @@
 #include <algorithm>
 #include <map>
 #include <array>
+#include <mutex>
 
 #include <oneapi/tbb/parallel_for.h>
 #include <oneapi/tbb/parallel_reduce.h>
 #include <oneapi/tbb/combinable.h>
+#include <oneapi/tbb/parallel_sort.h>
+#include <oneapi/tbb/parallel_invoke.h>
 
 sf::Uint32 Rgb2Lab(sf::Uint32 i_rgba)
 {
@@ -121,19 +124,12 @@ sf::Uint32 Lab2Rgb(sf::Uint32 i_lab)
 	return RGB;
 }
 
-
 sf::Image FlipFlopConvert(const sf::Image& i_image)
 {
 	const auto image_size = i_image.getSize();
 	std::vector<sf::Uint32> pixel_data(image_size.x * image_size.y);
 	auto* p_pixel_data = pixel_data.data();
 	std::memcpy(p_pixel_data, i_image.getPixelsPtr(), pixel_data.size() * 4);
-	//for (auto& pixel : raw_pixel_data)
-	//{
-	//	auto* p_rgba = reinterpret_cast<char*>(&pixel);
-	//	std::cout << int(p_rgba[3]) << "\n";
-	//}
-
 
 	tbb::parallel_for(tbb::blocked_range<size_t>(0, pixel_data.size()),
 		[&pixel_data](const tbb::blocked_range<size_t>& i_r) {
@@ -175,74 +171,6 @@ size_t Distance(const sf::Uint32* i_color_1, const sf::Uint32* i_color_2)
 		static_cast<size_t>(c1[3]) * c2[3];
 }
 
-sf::Uint32 Average(const sf::Uint32* ip_pixels, size_t i_number_of_pixels)
-{
-	std::array<size_t, 4> accum = { 0,0,0,0 };
-	for (size_t i = 0; i < i_number_of_pixels; i++)
-	{
-		const auto* p = reinterpret_cast<const sf::Uint8*>(ip_pixels + i);
-		accum[0] += p[0];
-		accum[1] += p[1];
-		accum[2] += p[2];
-		accum[3] += p[3];
-	}
-	sf::Uint32 average = 0;
-	sf::Uint8* p = reinterpret_cast<sf::Uint8*>(&average);
-	p[0] = accum[0] / i_number_of_pixels;
-	p[1] = accum[1] / i_number_of_pixels;
-	p[2] = accum[2] / i_number_of_pixels;
-	p[3] = accum[3] / i_number_of_pixels;
-	return average;
-}
-
-sf::Uint32 PAverage(sf::Uint32* ip_pixels, size_t i_number_of_pixels)
-{
-	tbb::combinable<std::array<size_t, 4>> sum(std::array<size_t, 4>{ 0, 0, 0, 0 });
-	tbb::parallel_for(tbb::blocked_range<sf::Uint32*>(ip_pixels, ip_pixels + i_number_of_pixels),
-		[&sum](const tbb::blocked_range<sf::Uint32*>& i_r) {
-			for (sf::Uint32* p_pixel = i_r.begin(); p_pixel != i_r.end(); ++p_pixel)
-			{
-				auto& partial_sum = sum.local();
-				auto* p = reinterpret_cast<char*>(p_pixel);
-				partial_sum[0] += p[0];
-				partial_sum[1] += p[1];
-				partial_sum[2] += p[2];
-				partial_sum[3] += p[3];
-			}
-		});
-
-	std::array<size_t, 4> accum = sum.combine([](const std::array<size_t, 4>& f, const std::array<size_t, 4>& s) {
-		auto partial_sum = f;
-		for (size_t i = 0; i < partial_sum.size(); i++)
-			partial_sum[i] += s[i];
-		return partial_sum;
-		});
-
-	sf::Uint32 average = 0;
-	sf::Uint8* p = reinterpret_cast<sf::Uint8*>(&average);
-	p[0] = accum[0] / i_number_of_pixels;
-	p[1] = accum[1] / i_number_of_pixels;
-	p[2] = accum[2] / i_number_of_pixels;
-	p[3] = accum[3] / i_number_of_pixels;
-	return average;
-}
-
-void Sort(sf::Uint32* iop_pixels, size_t i_number_of_pixels, size_t i_chanel)
-{
-
-	for (size_t i = 0; i < i_number_of_pixels - 1; i++)
-		for (size_t j = 0; j < i_number_of_pixels - i - 1; j++)
-		{
-			if (reinterpret_cast<sf::Uint8*>(iop_pixels + j)[i_chanel] > reinterpret_cast<sf::Uint8*>(iop_pixels + j + 1)[i_chanel])
-			{
-				sf::Uint32 temp = iop_pixels[j];
-				iop_pixels[j] = iop_pixels[j + 1];
-				iop_pixels[j + 1] = temp;
-				//std::swap(indicies[j], indicies[j + 1]);
-			}
-		}
-}
-
 size_t WidestChannel(const sf::Uint32* ip_pixels, size_t i_number_of_pixels)
 {
 	sf::Uint8 min_r = 0, min_g = 0, min_b = 0, max_r = 0, max_g = 0, max_b = 0;
@@ -265,63 +193,6 @@ size_t WidestChannel(const sf::Uint32* ip_pixels, size_t i_number_of_pixels)
 		return 1;
 	return 2;
 }
-
-
-size_t DWidestChannel(const sf::Uint32* ip_pixels, size_t i_number_of_pixels)
-{
-	class MinMax {
-		const sf::Uint32* m_pixels;
-	public:
-		sf::Uint8 m_min_r = 0, m_min_g = 0, m_min_b = 0, m_max_r = 0, m_max_g = 0, m_max_b = 0;
-
-		void operator()(const tbb::blocked_range<size_t>& r) {
-			sf::Uint8 min_r = m_min_r, min_g = m_min_g, min_b = m_min_b, max_r = m_max_r, max_g = m_max_g, max_b = m_max_b;
-			size_t end = r.end();
-			for (size_t i = r.begin(); i != end; ++i)
-			{
-				const auto* p = reinterpret_cast<const sf::Uint8*>(m_pixels + i);
-				min_r = std::min(min_r, p[0]);
-				min_g = std::min(min_g, p[1]);
-				min_b = std::min(min_b, p[2]);
-				max_r = std::max(max_r, p[0]);
-				max_g = std::max(max_g, p[1]);
-				max_b = std::max(max_b, p[2]);
-			}
-			// mutex of the instance is needed here
-			m_min_r = min_r;
-			m_min_g = min_g;
-			m_min_b = min_b;
-			m_max_r = max_r;
-			m_max_g = max_g;
-			m_max_b = max_b;
-		}
-
-		MinMax(MinMax& x, tbb::split) : m_pixels(x.m_pixels) {}
-
-		void join(const MinMax& y) {
-			m_min_r = std::min(m_min_r, y.m_min_r);
-			m_min_g = std::min(m_min_g, y.m_min_g);
-			m_min_b = std::min(m_min_b, y.m_min_b);
-			m_max_r = std::max(m_max_r, y.m_max_r);
-			m_max_g = std::max(m_max_g, y.m_max_g);
-			m_max_b = std::max(m_max_b, y.m_max_b);
-		}
-
-		MinMax(const sf::Uint32* i_pixels) : m_pixels(i_pixels)
-		{}
-	};
-	MinMax min_max(ip_pixels);
-	tbb::parallel_reduce(tbb::blocked_range<size_t>(0, i_number_of_pixels), min_max);
-
-	sf::Uint8 d_r = min_max.m_max_r - min_max.m_min_r, d_g = min_max.m_max_g - min_max.m_min_g, d_b = min_max.m_max_b - min_max.m_min_b;
-	std::cout << "Ranges: " << int(d_r) << " " << int(d_g) << " " << int(d_b) << " " << std::endl;
-	if (d_r >= d_b && d_r >= d_g)
-		return 0;
-	if (d_g >= d_r && d_g >= d_b)
-		return 1;
-	return 2;
-}
-
 
 void CreateHistogram(sf::Uint32* ip_pixels, size_t i_number_of_pixels, size_t i_devisions = 4)
 {
@@ -347,25 +218,80 @@ void CreateHistogram(const sf::Image& i_image, size_t i_devisions = 4)
 	CreateHistogram(p_pixel_data, raw_pixel_data.size());
 }
 
-std::vector<sf::Uint32> CreateColorPallet(sf::Uint32* ip_pixels, size_t i_number_of_pixels, size_t i_devisions = 4)
+void Sort(std::vector<sf::Uint32>::iterator i_begin, std::vector<sf::Uint32>::iterator i_end, size_t i_chanel)
+{
+	tbb::parallel_sort(i_begin, i_end, [i_chanel](const sf::Uint32 a, sf::Uint32 b)
+		{
+			sf::Uint8 a_c = a >> 8 * i_chanel;
+			sf::Uint8 b_c = b >> 8 * i_chanel;
+
+			return a_c < b_c;
+		});
+}
+
+sf::Uint32 Average(std::vector<sf::Uint32>::iterator i_begin, std::vector<sf::Uint32>::iterator i_end)
+{
+	std::array<size_t, 4> accum = { 0,0,0,0 };
+	for (auto it = i_begin; it < i_end; ++it)
+	{
+		const auto* p = reinterpret_cast<const sf::Uint8*>(&(*it));
+		accum[0] += p[0];
+		accum[1] += p[1];
+		accum[2] += p[2];
+		accum[3] += p[3];
+	}
+	sf::Uint32 average = 0;
+	sf::Uint8* p = reinterpret_cast<sf::Uint8*>(&average);
+	const size_t number_of_pixels = std::distance(i_begin, i_end);
+	p[0] = accum[0] / number_of_pixels;
+	p[1] = accum[1] / number_of_pixels;
+	p[2] = accum[2] / number_of_pixels;
+	p[3] = accum[3] / number_of_pixels;
+	return average;
+}
+
+size_t WidestChannel(std::vector<sf::Uint32>::iterator i_begin, std::vector<sf::Uint32>::iterator i_end)
+{
+	sf::Uint8 min_r = 0, min_g = 0, min_b = 0, max_r = 0, max_g = 0, max_b = 0;
+	for (auto it = i_begin; it < i_end; ++it)
+	{
+		const auto* p = reinterpret_cast<const sf::Uint8*>(&(*it));
+		min_r = std::min(min_r, p[0]);
+		min_g = std::min(min_g, p[1]);
+		min_b = std::min(min_b, p[2]);
+		max_r = std::max(max_r, p[0]);
+		max_g = std::max(max_g, p[1]);
+		max_b = std::max(max_b, p[2]);
+	}
+	sf::Uint8 d_r = max_r - min_r, d_g = max_g - min_g, d_b = max_b - min_b;
+	std::cout << "Ranges: " << int(d_r) << " " << int(d_g) << " " << int(d_b) << " " << std::endl;
+	if (d_r >= d_b && d_r >= d_g)
+		return 0;
+	if (d_g >= d_r && d_g >= d_b)
+		return 1;
+	return 2;
+}
+
+std::vector<sf::Uint32> CreateColorPallet(std::vector<sf::Uint32>::iterator i_begin, std::vector<sf::Uint32>::iterator i_end, size_t i_devisions = 4)
 {
 	if (i_devisions == 0) //calculate averege
 	{
-		const auto average = Average(ip_pixels, i_number_of_pixels);
-		for (size_t i = 0; i < i_number_of_pixels; i++)
-			ip_pixels[i] = average;
-
+		const auto average = Average(i_begin, i_end);
+		for (auto it = i_begin; it < i_end; ++it)
+			*it = average;
 		return { average };
 	}
 
-	const auto channel = WidestChannel(ip_pixels, i_number_of_pixels);
+	const auto channel = WidestChannel(i_begin, i_end);
 	std::cout << "Div " << i_devisions << " channel to sort" << channel << "\n";
-	Sort(ip_pixels, i_number_of_pixels, channel);
+	Sort(i_begin, i_end, channel);
 
 	--i_devisions;
-	const auto first_half_of_pixels = i_number_of_pixels / 2;
-	auto pallet_1 = CreateColorPallet(ip_pixels, first_half_of_pixels, i_devisions);
-	auto pallet_2 = CreateColorPallet(ip_pixels + first_half_of_pixels, i_number_of_pixels - first_half_of_pixels, i_devisions);
+	const auto first_half_of_pixels = std::distance(i_begin, i_end) / 2;
+	//parallelization of two following NewCreateColorPallet is redaundant
+	//99.9p of work is already parallelized inside 
+	std::vector<sf::Uint32> pallet_1 = CreateColorPallet(i_begin, i_begin + first_half_of_pixels, i_devisions);
+	std::vector<sf::Uint32> pallet_2 = CreateColorPallet(i_begin + first_half_of_pixels, i_end, i_devisions);
 	pallet_1.insert(pallet_1.cend(), pallet_2.cbegin(), pallet_2.cend());
 	return pallet_1;
 }
@@ -377,8 +303,8 @@ std::vector<sf::Uint32> CreateColorPallet(const sf::Image& i_image)
 	auto* p_pixel_data = raw_pixel_data.data();
 	std::memcpy(p_pixel_data, i_image.getPixelsPtr(), raw_pixel_data.size() * 4);
 
-
-	return CreateColorPallet(p_pixel_data, raw_pixel_data.size());
+	std::cout << "NewCreateColorPallet " << "\n";
+	return CreateColorPallet(raw_pixel_data.begin(), raw_pixel_data.end());
 }
 
 sf::Image ApplyColorPallet(const sf::Image& i_image, const std::vector<sf::Uint32>& i_pallet)
@@ -428,7 +354,7 @@ sf::Image CreateSortedImage(const sf::Image& i_image)
 	auto* p_pixel_data = raw_pixel_data.data();
 	std::memcpy(p_pixel_data, i_image.getPixelsPtr(), raw_data_size);
 
-	CreateColorPallet(p_pixel_data, number_of_pixels);
+	CreateColorPallet(raw_pixel_data.begin(), raw_pixel_data.end());
 
 	sf::Image res;
 	res.create(image_size.x, image_size.y, reinterpret_cast<sf::Uint8*>(raw_pixel_data.data()));
@@ -465,19 +391,22 @@ void Comp(const sf::Image& i_image)
 	auto* p_pixel_data = pixel_data.data();
 	std::memcpy(p_pixel_data, i_image.getPixelsPtr(), pixel_data.size() * 4);
 
-	std::vector<std::chrono::time_point<std::chrono::system_clock>> timestamps;
-	timestamps.emplace_back(std::chrono::system_clock::now());
-	const auto f_a = WidestChannel(p_pixel_data, pixel_data.size());
-	timestamps.emplace_back(std::chrono::system_clock::now());
-	const auto s_a = DWidestChannel(p_pixel_data, pixel_data.size());
-	timestamps.emplace_back(std::chrono::system_clock::now());
-
-	std::cout << f_a << " " << s_a << std::endl;
-
-	for (size_t i = 1; i < timestamps.size(); ++i)
+	for (size_t i = 0; i < pixel_data.size(); i++)
 	{
-		std::chrono::duration<int64_t, std::nano> time = timestamps[i] - timestamps[i - 1];
-		std::cout << "per" << i << ": " << time.count() / 1000000.0 << std::endl;
+
+		const auto* p = reinterpret_cast<const sf::Uint8*>(&(pixel_data[i]));
+		if (p[0] != sf::Uint8(pixel_data[i] >> (8 * 0)) ||
+			p[1] != sf::Uint8(pixel_data[i] >> (8 * 1)) ||
+			p[2] != sf::Uint8(pixel_data[i] >> (8 * 2)) ||
+			p[3] != sf::Uint8(pixel_data[i] >> (8 * 3)))
+		{
+			std::cout << int(p[0]) << "," << int(p[1]) << "," << int(p[2]) << "," << int(p[3]) << "\n";
+			std::cout << int(sf::Uint8(pixel_data[i] >> 8 * 0)) << ","
+				<< int(sf::Uint8(pixel_data[i] >> 8 * 1)) << ","
+				<< int(sf::Uint8(pixel_data[i] >> 8 * 2)) << ","
+				<< int(sf::Uint8(pixel_data[i] >> 8 * 3)) << "\n";
+		}
+
 	}
 }
 
@@ -501,21 +430,21 @@ int main(int argc, char** argv)
 	const auto image_size = image.getSize();
 	std::vector<std::chrono::time_point<std::chrono::system_clock>> timestamps;
 	timestamps.emplace_back(std::chrono::system_clock::now());
+	const auto pallet = CreateColorPallet(image);
+	timestamps.emplace_back(std::chrono::system_clock::now());
 
-	CreateHistogram(image);
+
+	//CreateHistogram(image);
+
 	const auto reduced_image = FlipFlopConvert(image);
 	timestamps.emplace_back(std::chrono::system_clock::now());
 	const auto sorted_image = UniformQuantizedImage(image, 6);
 	timestamps.emplace_back(std::chrono::system_clock::now());
-	const auto reduced_sorted_image = image;
+	const auto reduced_sorted_image = ApplyColorPallet(sorted_image, pallet);
 	timestamps.emplace_back(std::chrono::system_clock::now());
-
 	/*
-	const auto pallet = CreateColorPallet(image);
-	timestamps.emplace_back(std::chrono::system_clock::now());
-	//return 3;
 
-	const auto reduced_image = ApplyColorPallet(image, pallet);
+
 	timestamps.emplace_back(std::chrono::system_clock::now());
 
 	const auto sorted_image = CreateSortedImage(image);
@@ -525,7 +454,6 @@ int main(int argc, char** argv)
 	timestamps.emplace_back(std::chrono::system_clock::now());
 
 	*/
-
 
 	for (size_t i = 1; i < timestamps.size(); ++i)
 	{
